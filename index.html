@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+  <title>Imagen AR sobre mesa</title>
+  <style>
+    html, body { margin:0; padding:0; height:100%; }
+    #overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.8);
+      color: white; display: flex; flex-direction: column; align-items: center; justify-content: center;
+      text-align: center; padding: 16px; gap: 16px; z-index: 10;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+    }
+    #startBtn { font-size:18px; padding:12px 20px; border:none; border-radius:8px; background:#1e88e5; color:white; }
+    #hint {
+      position: fixed; left: 50%; transform: translateX(-50%);
+      bottom: 16px; color: white; background: rgba(0,0,0,0.5);
+      padding: 8px 12px; border-radius: 6px; font-size: 14px; display:none;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+    }
+    #unsupported { padding:20px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; }
+    canvas { display:block; }
+  </style>
+</head>
+<body>
+  <div id="overlay">
+    <h2>Ver imagen en Realidad Aumentada</h2>
+    <p>Apunta tu cámara hacia una mesa para visualizar la imagen en AR.</p>
+    <button id="startBtn">Entrar a AR</button>
+    <div style="opacity:.8;font-size:12px">iOS 17+ (Safari) o Android (Chrome) con WebXR</div>
+  </div>
+  <div id="hint">Toca para colocar la imagen</div>
+  <div id="unsupported" hidden>
+    <h3>Tu navegador no soporta AR WebXR</h3>
+    <p>Puedes ver la imagen aquí debajo como alternativa.</p>
+    <img src="./covertura_v3.png" alt="Imagen" style="max-width:100%;height:auto;border:1px solid #ddd;border-radius:8px" />
+  </div>
+
+  <script type="module">
+    import * as THREE from "https://unpkg.com/three@0.160.0/build/three.module.js";
+    import { ARButton } from "https://unpkg.com/three@0.160.0/examples/jsm/webxr/ARButton.js";
+
+    if (!navigator.xr || !('isSessionSupported' in navigator.xr)) {
+      document.getElementById('unsupported').hidden = false;
+      document.getElementById('overlay').style.display = 'none';
+    }
+
+    const overlay = document.getElementById('overlay');
+    const startBtn = document.getElementById('startBtn');
+    const hint = document.getElementById('hint');
+
+    let renderer, scene, camera;
+    let hitTestSource = null;
+    let hitTestSourceRequested = false;
+    let reticle;
+    let placed = false;
+
+    // Tamaño real deseado (≈70 cm)
+    const REAL_WIDTH_METERS = 0.7;
+    const IMG_URL = './covertura_v3.png';
+
+    startBtn?.addEventListener('click', async () => {
+      if (!navigator.xr) return;
+      const supported = await navigator.xr.isSessionSupported('immersive-ar');
+      if (!supported) {
+        document.getElementById('unsupported').hidden = false;
+        overlay.style.display = 'none';
+        return;
+      }
+      overlay.style.display = 'none';
+      init();
+    });
+
+    function init() {
+      renderer = new THREE.WebGLRenderer({ antialias:true, alpha:true });
+      renderer.setPixelRatio(window.devicePixelRatio);
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.xr.enabled = true;
+      renderer.xr.addEventListener('sessionstart', ()=> { hint.style.display='block'; });
+      renderer.xr.addEventListener('sessionend', ()=> {
+        hint.style.display='none'; hitTestSourceRequested=false; hitTestSource=null; placed=false;
+      });
+      document.body.appendChild(renderer.domElement);
+
+      scene = new THREE.Scene();
+      camera = new THREE.PerspectiveCamera();
+
+      const light = new THREE.HemisphereLight(0xffffff, 0xbbbbbb, 1.0);
+      scene.add(light);
+
+      reticle = new THREE.Mesh(
+        new THREE.RingGeometry(0.08, 0.1, 32).rotateX(-Math.PI/2),
+        new THREE.MeshBasicMaterial({ color: 0xffffff })
+      );
+      reticle.matrixAutoUpdate = false;
+      reticle.visible = false;
+      scene.add(reticle);
+
+      document.body.appendChild(ARButton.createButton(renderer, { requiredFeatures: ['hit-test'] }));
+      renderer.setAnimationLoop(render);
+
+      window.addEventListener('click', () => {
+        if (reticle.visible && !placed) {
+          placeImageAtReticle();
+          placed = true;
+          hint.style.display='none';
+        }
+      });
+
+      window.addEventListener('resize', () => renderer.setSize(window.innerWidth, window.innerHeight));
+    }
+
+    let planeMesh = null;
+    async function placeImageAtReticle() {
+      const texLoader = new THREE.TextureLoader();
+      const texture = await new Promise((resolve, reject)=>{ texLoader.load(IMG_URL, resolve, undefined, reject); });
+      texture.colorSpace = THREE.SRGBColorSpace;
+
+      const imgAspect = texture.image.width / texture.image.height;
+      const width = REAL_WIDTH_METERS;
+      const height = width / imgAspect;
+
+      const geometry = new THREE.PlaneGeometry(width, height);
+      const material = new THREE.MeshBasicMaterial({ map: texture, side: THREE.DoubleSide });
+      planeMesh = new THREE.Mesh(geometry, material);
+
+      planeMesh.position.setFromMatrixPosition(reticle.matrix);
+      planeMesh.quaternion.setFromRotationMatrix(reticle.matrix);
+
+      scene.add(planeMesh);
+    }
+
+    async function render(timestamp, frame) {
+      if (frame) {
+        const referenceSpace = renderer.xr.getReferenceSpace();
+        const session = renderer.xr.getSession();
+
+        if (!hitTestSourceRequested) {
+          session.requestReferenceSpace('viewer').then((refSpace) => {
+            session.requestHitTestSource({ space: refSpace }).then((source) => {
+              hitTestSource = source;
+            });
+          });
+          session.addEventListener('end', () => { hitTestSourceRequested = false; hitTestSource = null; });
+          hitTestSourceRequested = true;
+        }
+
+        if (hitTestSource) {
+          const hitTestResults = frame.getHitTestResults(hitTestSource);
+          if (hitTestResults.length) {
+            const hit = hitTestResults[0];
+            const pose = hit.getPose(referenceSpace);
+            reticle.visible = true;
+            reticle.matrix.fromArray(pose.transform.matrix);
+          } else {
+            reticle.visible = false;
+          }
+        }
+      }
+      renderer.render(scene, camera);
+    }
+  </script>
+</body>
+</html>
